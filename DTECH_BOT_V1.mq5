@@ -5,129 +5,318 @@
 //+------------------------------------------------------------------+
 #property copyright "D-TECH Services"
 #property link      "https://preasx24.co.za"
-#property version   "1.00"
+#property version   "2.00"
 #property strict
 
-// Include the standard trade library to handle order execution easily
+//+------------------------------------------------------------------+
+//| INCLUDES                                                         |
+//+------------------------------------------------------------------+
 #include <Trade/Trade.mqh>
 
-// Create an instance of the execution object
-CTrade trade;
-
-// --- D-TECH INPUTS ---
-input double LotSize = 0.01;      // Volume to trade
-input int    StopLossPoints = 200; // Stop Loss in Points (20 pips on 5-digit broker)
-input int    TakeProfitPoints = 400; // Take Profit in Points (40 pips on 5-digit broker)
-input int    FastMA_Period = 10;   // Fast EMA Period
-input int    SlowMA_Period = 20;   // Slow EMA Period
-
-// Global variables for our indicators
-int maFastHandle;
-int maSlowHandle;
+//+------------------------------------------------------------------+
+//| ENUMS & CONSTANTS                                                |
+//+------------------------------------------------------------------+
+enum ENUM_RISK_MODE
+  {
+   RISK_FIXED,    // Fixed Lot Size
+   RISK_PERCENT   // Percentage of Equity
+  };
 
 //+------------------------------------------------------------------+
-//| Expert initialization function                                   |
+//| INPUT PARAMETERS                                                 |
+//+------------------------------------------------------------------+
+// --- Risk Management (AGGRESSOR MODE) ---
+input group             "=== Money Management ==="
+input ENUM_RISK_MODE    InpRiskMode          = RISK_PERCENT; // Risk Mode
+input double            InpRiskPercent       = 5.0;          // Risk Percent (Aggressor: 5-10%)
+input double            InpFixedLot          = 0.01;         // Fixed Lot Size (if Fixed Mode)
+input double            InpMaxLot            = 100.0;        // Maximum allowed lot size
+
+// --- Strategy Settings (MACHINE GUN MODE) ---
+input group             "=== Strategy Settings ==="
+input int               InpTrendPeriod       = 50;           // Trend EMA Period (Faster Trend)
+input int               InpRsiPeriod         = 9;            // RSI Period (Sensitive)
+input int               InpRsiOverbought     = 70;           // RSI Overbought Level
+input int               InpRsiOversold       = 30;           // RSI Oversold Level
+input int               InpStopLoss          = 200;          // Stop Loss (Points)
+input int               InpTakeProfit        = 400;          // Take Profit (Points)
+
+// --- Trade Management ---
+input group             "=== Trade Management ==="
+input bool              InpUseTrailing       = true;         // Use Trailing Stop
+input int               InpTrailStart        = 100;          // Start Trailing after X Points profit
+input int               InpTrailDist         = 50;           // Trailing Distance (Points)
+
+// --- Filters ---
+input group             "=== Filters ==="
+input int               InpMaxSpread         = 20;           // Max Spread (Points)
+input int               InpStartHour         = 0;            // Start Trading Hour (0-23)
+input int               InpEndHour           = 23;           // End Trading Hour (0-23)
+input int               InpMaxPositions      = 5;            // Max Open Positions
+input int               InpMagicNum          = 123456;       // Magic Number
+
+//+------------------------------------------------------------------+
+//| GLOBAL VARIABLES                                                 |
+//+------------------------------------------------------------------+
+CTrade         trade;
+int            handleTrendEMA;
+int            handleRSI;
+
+//+------------------------------------------------------------------+
+//| INITIALIZATION                                                   |
 //+------------------------------------------------------------------+
 int OnInit()
-{
-   // 1. Define the indicators
-   maFastHandle = iMA(_Symbol, PERIOD_CURRENT, FastMA_Period, 0, MODE_EMA, PRICE_CLOSE);
-   maSlowHandle = iMA(_Symbol, PERIOD_CURRENT, SlowMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+  {
+   // 1. Initialize Indicators
+   handleTrendEMA = iMA(_Symbol, PERIOD_CURRENT, InpTrendPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   handleRSI      = iRSI(_Symbol, PERIOD_CURRENT, InpRsiPeriod, PRICE_CLOSE);
 
-   // 2. Check if handles were created successfully
-   if(maFastHandle == INVALID_HANDLE || maSlowHandle == INVALID_HANDLE)
-   {
-      Print("CRITICAL ERROR: Failed to create MA handles.");
+   // 2. Validate Handles
+   if(handleTrendEMA == INVALID_HANDLE || handleRSI == INVALID_HANDLE)
+     {
+      Print("CRITICAL: Failed to create indicator handles.");
       return(INIT_FAILED);
-   }
+     }
 
-   // 3. Set magic number (ID) so the bot knows which trades are its own
-   trade.SetExpertMagicNumber(123456);
+   // 3. Setup Trade Object
+   trade.SetExpertMagicNumber(InpMagicNum);
+   trade.SetMarginMode();
+   trade.SetTypeFillingBySymbol(_Symbol);
 
-   Print(">> DTECH BOT V1 INITIALIZED <<");
+   Print(">> DTECH BOT V2 (AGGRESSOR) INITIALIZED <<");
    return(INIT_SUCCEEDED);
-}
+  }
 
 //+------------------------------------------------------------------+
-//| Expert tick function                                             |
+//| DEINITIALIZATION                                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   // Release handles
+   IndicatorRelease(handleTrendEMA);
+   IndicatorRelease(handleRSI);
+   Print(">> DTECH BOT STOPPED <<");
+  }
+
+//+------------------------------------------------------------------+
+//| MAIN TICK FUNCTION                                               |
 //+------------------------------------------------------------------+
 void OnTick()
-{
-   // Define dynamic arrays to hold the MA values
-   double maFast[], maSlow[];
+  {
+   // 1. Check basic conditions (Terminal connected, Spread, etc.)
+   if(!CheckEnvironment()) return;
 
-   // Sort arrays so index [0] is the current candle, [1] is the previous
-   ArraySetAsSeries(maFast, true);
-   ArraySetAsSeries(maSlow, true);
+   // 2. Manage Open Positions (Trailing Stop)
+   ManagePositions();
 
-   // Copy the last 3 values (enough to check for a crossover)
-   // Handle, Buffer 0, Start at 0, Copy 3 items, Target Array
-   if(CopyBuffer(maFastHandle, 0, 0, 3, maFast) < 3 || CopyBuffer(maSlowHandle, 0, 0, 3, maSlow) < 3)
-   {
-      // If we don't have data yet, wait for next tick
-      Print("Waiting for data...");
+   // 3. Check for New Entry Signals
+   // Check total positions for this EA
+   int count = 0;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      if(PositionGetTicket(i) > 0)
+         if(PositionGetInteger(POSITION_MAGIC) == InpMagicNum && PositionGetString(POSITION_SYMBOL) == _Symbol)
+            count++;
+     }
+
+   if(count < InpMaxPositions)
+     {
+      CheckForEntry();
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| HELPER FUNCTIONS                                                 |
+//+------------------------------------------------------------------+
+
+//--- Check Trading Environment (Spread, Time, Connection)
+bool CheckEnvironment()
+  {
+   // Check if terminal is connected
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED)) return(false);
+
+   // Check Spread
+   double spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
+   if(spread > InpMaxSpread)
+     {
+      // Optional: Print only occasionally to avoid spam
+      return(false);
+     }
+
+   // Check Time (Server Time)
+   datetime timeCurrent = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(timeCurrent, dt);
+
+   if(InpStartHour < InpEndHour)
+     {
+      // Standard day session (e.g. 8 to 20)
+      if(dt.hour < InpStartHour || dt.hour >= InpEndHour) return(false);
+     }
+   else if(InpStartHour > InpEndHour)
+     {
+      // Overnight session (e.g. 22 to 8)
+      if(dt.hour < InpStartHour && dt.hour >= InpEndHour) return(false);
+     }
+
+   return(true);
+  }
+
+//--- Calculate Lot Size based on Risk
+double CalculateLotSize(double slPoints)
+  {
+   double volume = 0.0;
+
+   if(InpRiskMode == RISK_FIXED)
+     {
+      volume = InpFixedLot;
+     }
+   else // RISK_PERCENT
+     {
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      double riskMoney = balance * (InpRiskPercent / 100.0);
+
+      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      // Fallback if tick value is unknown or zero to prevent div by zero
+      if(tickValue <= 0) tickValue = 1.0;
+
+      double moneyLossPerLot = slPoints * tickValue;
+      if(moneyLossPerLot <= 0) moneyLossPerLot = 1.0;
+
+      volume = riskMoney / moneyLossPerLot;
+     }
+
+   // Normalize Volume
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double min  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double max  = InpMaxLot; // User defined max or Symbol max
+   double symMax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(max > symMax) max = symMax;
+
+   // Round to step
+   volume = MathFloor(volume / step) * step;
+
+   // Clamp to limits
+   if(volume < min) volume = min; // Or 0 if strict risk management? Usually min to ensure trade
+   if(volume > max) volume = max;
+
+   return(volume);
+  }
+
+//--- Manage Open Positions (Trailing Stop)
+void ManagePositions()
+  {
+   if(!InpUseTrailing) return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      // Select the position to access its properties
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+
+      // Filter by Symbol and Magic Number
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol || PositionGetInteger(POSITION_MAGIC) != InpMagicNum)
+         continue;
+
+      // Get Position details
+      long   type     = PositionGetInteger(POSITION_TYPE);
+      double open     = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl       = PositionGetDouble(POSITION_SL);
+      double priceCurrent = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+      double point    = _Point;
+      int    digits   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+      // --- TRAILING STOP LOGIC ---
+
+      if(type == POSITION_TYPE_BUY)
+        {
+         // If profit > Start Level
+         if(priceCurrent - open > InpTrailStart * point)
+           {
+            double newSL = priceCurrent - InpTrailDist * point;
+
+            // Check if new SL is higher than current SL (or if no SL exists)
+            // Also ensure new SL is not too close to current price (StopLevel check handled by Trade class mostly, but good to be safe)
+            if(newSL > sl + point) // Add a small buffer to avoid constant tiny updates
+              {
+               trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+              }
+           }
+        }
+      else if(type == POSITION_TYPE_SELL)
+        {
+         // If profit > Start Level (Open - Current > Start)
+         if(open - priceCurrent > InpTrailStart * point)
+           {
+            double newSL = priceCurrent + InpTrailDist * point;
+
+            // Check if new SL is lower than current SL (or if no SL exists aka 0)
+            if(sl == 0 || newSL < sl - point)
+              {
+               trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+              }
+           }
+        }
+     }
+  }
+//--- Check for Entry Signals
+void CheckForEntry()
+  {
+   // Define arrays for data
+   double trendMA[];
+   double rsi[];
+   double close[];
+
+   ArraySetAsSeries(trendMA, true);
+   ArraySetAsSeries(rsi, true);
+   ArraySetAsSeries(close, true);
+
+   // Copy data (need at least 2 candles for crossover check)
+   if(CopyBuffer(handleTrendEMA, 0, 0, 3, trendMA) < 3 ||
+      CopyBuffer(handleRSI, 0, 0, 3, rsi) < 3 ||
+      CopyClose(_Symbol, PERIOD_CURRENT, 0, 3, close) < 3)
+     {
       return;
-   }
+     }
 
-   // HEARTBEAT: Print the values once per candle to prove we are alive
-   static datetime lastPrint = 0;
-   if(iTime(_Symbol, PERIOD_CURRENT, 0) != lastPrint)
-   {
-      Print("Bot Alive | Fast MA: ", maFast[0], " | Slow MA: ", maSlow[0]);
-      lastPrint = iTime(_Symbol, PERIOD_CURRENT, 0);
-   }
+   // --- STRATEGY LOGIC ---
 
-   // CHECK FOR OPEN POSITIONS
-   // We only want to open a trade if we don't already have one
-   if(PositionsTotal() == 0)
-   {
-      // --- BUY SIGNAL (CROSSOVER) ---
-      // Strategy: Fast MA was BELOW Slow MA yesterday [1], but is ABOVE today [0]
-      if(maFast[1] < maSlow[1] && maFast[0] > maSlow[0])
-      {
-         Print("!!! CROSSOVER DETECTED - ATTEMPTING BUY !!!");
-         Print("Buy Signal Detected: Fast EMA crossed above Slow EMA");
-         tradeBuy();
-      }
+   // 1. Trend Direction
+   bool isUptrend   = close[1] > trendMA[1];
+   bool isDowntrend = close[1] < trendMA[1];
 
-      // --- SELL SIGNAL (CROSSUNDER) ---
-      // Strategy: Fast MA was ABOVE Slow MA yesterday [1], but is BELOW today [0]
-      else if(maFast[1] > maSlow[1] && maFast[0] < maSlow[0])
-      {
-         Print("!!! CROSSOVER DETECTED - ATTEMPTING SELL !!!");
-         Print("Sell Signal Detected: Fast EMA crossed below Slow EMA");
-         tradeSell();
-      }
-   }
-}
+   // 2. Buy Signal (Uptrend + RSI crossover out of Oversold)
+   // RSI was below 30, now is above 30
+   if(isUptrend && rsi[1] < InpRsiOversold && rsi[0] > InpRsiOversold)
+     {
+      Print(">>> BUY SIGNAL: Price > EMA and RSI crossing up from Oversold");
 
-//+------------------------------------------------------------------+
-//| Helper Function: Execute Buy                                     |
-//+------------------------------------------------------------------+
-void tradeBuy()
-{
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double sl  = ask - InpStopLoss * _Point;
+      double tp  = ask + InpTakeProfit * _Point;
+      double lot = CalculateLotSize(InpStopLoss);
 
-   // Calculate SL and TP based on Points
-   // Note: On IC Markets, 1 Point = 0.00001 (for EURUSD).
-   double sl = ask - StopLossPoints * _Point;
-   double tp = ask + TakeProfitPoints * _Point;
+      if(lot > 0)
+        {
+         trade.Buy(lot, _Symbol, ask, sl, tp, "DTECH Machine Gun Buy");
+        }
+     }
 
-   // Execute
-   trade.Buy(LotSize, _Symbol, ask, sl, tp, "DTECH Buy");
-}
+   // 3. Sell Signal (Downtrend + RSI crossover out of Overbought)
+   // RSI was above 70, now is below 70
+   else if(isDowntrend && rsi[1] > InpRsiOverbought && rsi[0] < InpRsiOverbought)
+     {
+      Print(">>> SELL SIGNAL: Price < EMA and RSI crossing down from Overbought");
 
-//+------------------------------------------------------------------+
-//| Helper Function: Execute Sell                                    |
-//+------------------------------------------------------------------+
-void tradeSell()
-{
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double sl  = bid + InpStopLoss * _Point;
+      double tp  = bid - InpTakeProfit * _Point;
+      double lot = CalculateLotSize(InpStopLoss);
 
-   // Calculate SL and TP
-   double sl = bid + StopLossPoints * _Point;
-   double tp = bid - TakeProfitPoints * _Point;
-
-   // Execute
-   trade.Sell(LotSize, _Symbol, bid, sl, tp, "DTECH Sell");
-}
+      if(lot > 0)
+        {
+         trade.Sell(lot, _Symbol, bid, sl, tp, "DTECH Machine Gun Sell");
+        }
+     }
+  }
