@@ -29,6 +29,7 @@ enum ENUM_RISK_MODE
 input group             "=== Money Management ==="
 input ENUM_RISK_MODE    InpRiskMode          = RISK_PERCENT; // Risk Mode
 input double            InpRiskPercent       = 5.0;          // Risk Percent (Aggressor: 5-10%)
+input bool              InpUseRiskFallback   = true;         // Use Minimum Lot if risk calc is too low
 input double            InpFixedLot          = 0.01;         // Fixed Lot Size (if Fixed Mode)
 input double            InpMaxLot            = 100.0;        // Maximum allowed lot size
 
@@ -176,7 +177,7 @@ bool CheckEnvironment()
   }
 
 //--- Calculate Lot Size based on Risk
-double CalculateLotSize(double slPoints)
+double CalculateLotSize(double slPoints, bool verbose=true)
   {
    double volume = 0.0;
 
@@ -212,8 +213,16 @@ double CalculateLotSize(double slPoints)
    // Clamp to limits
    if(volume < min)
      {
-      Print(StringFormat("RISK ALERT: Calculated volume %.5f is below minimum %.2f. Balance too low for %.1f%% risk.", volume, min, InpRiskPercent));
-      return(0.0);
+      if(InpUseRiskFallback)
+        {
+         if(verbose) Print(StringFormat("RISK WARNING: Calculated volume %.5f is below min. FALLBACK used: %.2f.", volume, min));
+         volume = min;
+        }
+      else
+        {
+         if(verbose) Print(StringFormat("RISK ALERT: Calculated volume %.5f is below minimum %.2f. Balance too low for %.1f%% risk.", volume, min, InpRiskPercent));
+         return(0.0);
+        }
      }
    if(volume > max) volume = max;
 
@@ -414,15 +423,22 @@ void UpdateStatus()
 
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
    double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double nextLot = CalculateLotSize(InpStopLoss, false);
 
    string msg = StringFormat(
       "=== DTECH BOT V2 (AGGRESSOR) ===\n"
-      "Balance: %.2f | Equity: %.2f | Risk: %.1f%%\n"
-      "Price: %.5f | EMA(%d): %.5f | %s\n"
+      "--------------------------------\n"
+      "Balance: %.2f | Equity: %.2f\n"
+      "Risk: %.1f%% | NEXT LOT: %.2f%s\n"
+      "--------------------------------\n"
+      "Price: %.5f | EMA(%d): %.5f\n"
+      "Trend: %s\n"
       "RSI(%d): %.2f %s\n"
       "Spread: %d | Time: %s",
-      bal, eq, InpRiskPercent,
-      close, InpTrendPeriod, ema, trend,
+      bal, eq,
+      InpRiskPercent, nextLot, (nextLot == 0.0 ? " (BLOCKED)" : ""),
+      close, InpTrendPeriod, ema,
+      trend,
       InpRsiPeriod, rsi, (rsi > InpRsiOverbought ? "(OB)" : (rsi < InpRsiOversold ? "(OS)" : "")),
       (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), TimeToString(TimeCurrent(), TIME_MINUTES)
    );
