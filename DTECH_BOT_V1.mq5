@@ -59,7 +59,7 @@ input bool              InpForceHistoryDownload = true;      // Force History Do
 
 // --- Debugging ---
 input group             "=== Debugging ==="
-input bool              InpForceTestTrade    = false;        // Force Immediate Test Trade
+input bool              InpForceTestTrade    = true;         // Force Immediate Test Trade
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
