@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "D-TECH Services"
 #property link      "https://preasx24.co.za"
-#property version   "2.00"
+#property version   "2.10" // Updated to 2.10 for Safety Pack
 #property strict
 
 //+------------------------------------------------------------------+
@@ -18,48 +18,50 @@
 //+------------------------------------------------------------------+
 enum ENUM_RISK_MODE
   {
-   RISK_FIXED,    // Fixed Lot Size
-   RISK_PERCENT   // Percentage of Equity
+   RISK_FIXED,    // Fixed Lot Size (Manual)
+   RISK_PERCENT   // Percentage of Equity (Auto)
   };
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
 //+------------------------------------------------------------------+
-// --- Risk Management (AGGRESSOR MODE) ---
-input group             "=== Money Management ==="
-input ENUM_RISK_MODE    InpRiskMode          = RISK_PERCENT; // Risk Mode
-input double            InpRiskPercent       = 5.0;          // Risk Percent (Aggressor: 5-10%)
-input bool              InpUseRiskFallback   = true;         // Use Minimum Lot if risk calc is too low
-input double            InpFixedLot          = 0.01;         // Fixed Lot Size (if Fixed Mode)
-input double            InpMaxLot            = 100.0;        // Maximum allowed lot size
 
-// --- Strategy Settings (MACHINE GUN MODE) ---
-input group             "=== Strategy Settings ==="
-input int               InpTrendPeriod       = 50;           // Trend EMA Period (Faster Trend)
-input int               InpRsiPeriod         = 9;            // RSI Period (Sensitive)
-input int               InpRsiOverbought     = 70;           // RSI Overbought Level
-input int               InpRsiOversold       = 30;           // RSI Oversold Level
-input int               InpStopLoss          = 200;          // Stop Loss (Points)
-input int               InpTakeProfit        = 400;          // Take Profit (Points)
+// --- SAFETY & CONTROL (BEGINNER PACK) ---
+input group             "=== MAIN CONTROL ==="
+input bool              InpMasterSwitch      = true;         // MASTER SWITCH (Turn False to STOP)
+input bool              InpForceTestTrade    = false;        // Make ONE Test Trade Now (Verify System)
+
+// --- Risk Management ---
+input group             "=== Money & Risk ==="
+input ENUM_RISK_MODE    InpRiskMode          = RISK_PERCENT; // Risk Calculation Mode
+input double            InpRiskPercent       = 1.0;          // Risk % per Trade (Safe: 1%, Aggressive: 5%+)
+input bool              InpUseRiskFallback   = true;         // Allow Min Lot if Account too small?
+input double            InpFixedLot          = 0.01;         // Fixed Lot Size (if Fixed Mode used)
+input double            InpMaxLot            = 100.0;        // Safety: Maximum allowed lot size
+
+// --- Strategy Settings ---
+input group             "=== Strategy Strategy ==="
+input int               InpTrendPeriod       = 50;           // Trend Filter (EMA Period)
+input int               InpRsiPeriod         = 9;            // Signal Sensor (RSI Period)
+input int               InpRsiOverbought     = 70;           // Sell Zone (>70)
+input int               InpRsiOversold       = 30;           // Buy Zone (<30)
+input int               InpStopLoss          = 200;          // Stop Loss (Points) - Protection
+input int               InpTakeProfit        = 400;          // Take Profit (Points) - Goal
 
 // --- Trade Management ---
 input group             "=== Trade Management ==="
-input bool              InpUseTrailing       = true;         // Use Trailing Stop
-input int               InpTrailStart        = 100;          // Start Trailing after X Points profit
-input int               InpTrailDist         = 50;           // Trailing Distance (Points)
+input bool              InpUseTrailing       = true;         // Lock in Profits (Trailing Stop)
+input int               InpTrailStart        = 100;          // Start locking after X points profit
+input int               InpTrailDist         = 50;           // Keep Stop X points away from price
 
-// --- Filters ---
-input group             "=== Filters ==="
-input int               InpMaxSpread         = 20;           // Max Spread (Points)
+// --- Advanced Filters ---
+input group             "=== Advanced Settings ==="
+input int               InpMaxSpread         = 20;           // Max Spread (Points) - Avoid high costs
 input int               InpStartHour         = 0;            // Start Trading Hour (0-23)
 input int               InpEndHour           = 23;           // End Trading Hour (0-23)
-input int               InpMaxPositions      = 5;            // Max Open Positions
-input int               InpMagicNum          = 123456;       // Magic Number
-input bool              InpForceHistoryDownload = true;      // Force History Download (Live Chart)
-
-// --- Debugging ---
-input group             "=== Debugging ==="
-input bool              InpForceTestTrade    = false;        // Force Immediate Test Trade
+input int               InpMaxPositions      = 5;            // Max Simultaneous Positions
+input int               InpMagicNum          = 123456;       // Magic Number (ID)
+input bool              InpForceHistoryDownload = true;      // Auto-Fix Charts (Download History)
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
@@ -71,6 +73,11 @@ bool           g_hasForcedTrade = false;
 
 // Forward Declaration
 void UpdateStatus();
+bool CheckEnvironment();
+void ManagePositions();
+void CheckForEntry();
+void DownloadHistory();
+double CalculateLotSize(double slPoints, bool verbose=true);
 
 //+------------------------------------------------------------------+
 //| INITIALIZATION                                                   |
@@ -99,7 +106,7 @@ int OnInit()
       DownloadHistory();
      }
 
-   Print(">> DTECH BOT V2 (AGGRESSOR) INITIALIZED <<");
+   Print(">> DTECH BOT V2.1 (SAFETY MODE) INITIALIZED <<");
    return(INIT_SUCCEEDED);
   }
 
@@ -112,6 +119,7 @@ void OnDeinit(const int reason)
    IndicatorRelease(handleTrendEMA);
    IndicatorRelease(handleRSI);
    Print(">> DTECH BOT STOPPED <<");
+   Comment(""); // Clear chart
   }
 
 //+------------------------------------------------------------------+
@@ -119,59 +127,83 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
-   // 0. Update Status (Comment on Chart)
+   // --- MASTER SWITCH CHECK ---
+   if(!InpMasterSwitch)
+     {
+      Comment("=== DTECH BOT PAUSED ===\nMaster Switch is OFF.\nTurn it ON in inputs to resume.");
+      return;
+     }
+
+   // 0. Update Dashboard
    UpdateStatus();
 
    // 1. Check basic conditions (Terminal connected, Spread, etc.)
    if(!CheckEnvironment()) return;
 
-   // --- FORCE TEST TRADE LOGIC ---
+   // --- FORCE TEST TRADE LOGIC (FIXED) ---
+   // Only run if requested AND we haven't done it yet this session
    if(InpForceTestTrade && !g_hasForcedTrade)
      {
-      Print(">>> FORCE TRADE: Initiating one-time test trade...");
-
-      // Get Trend Direction from EMA
-      double emaArr[], closeArr[];
-      ArraySetAsSeries(emaArr, true);
-      ArraySetAsSeries(closeArr, true);
-
-      if(CopyBuffer(handleTrendEMA, 0, 0, 1, emaArr) == 1 &&
-         CopyClose(_Symbol, PERIOD_CURRENT, 0, 1, closeArr) == 1)
+      // SAFETY: Check if a test trade is ALREADY open to prevent "Machine Gun" test trades
+      bool testTradeExists = false;
+      for(int i=PositionsTotal()-1; i>=0; i--)
         {
-         double ema   = emaArr[0];
-         double close = closeArr[0];
-         double lot   = CalculateLotSize(InpStopLoss);
-
-         if(lot > 0)
-           {
-            if(close > ema)
+         if(PositionGetTicket(i) > 0)
+            if(PositionGetInteger(POSITION_MAGIC) == InpMagicNum &&
+               PositionGetString(POSITION_COMMENT) == "DTECH Force Test")
               {
-               double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-               double sl  = ask - InpStopLoss * _Point;
-               double tp  = ask + InpTakeProfit * _Point;
-               Print(">>> FORCE TRADE: Executing BUY (Price > EMA).");
-               trade.Buy(lot, _Symbol, ask, sl, tp, "DTECH Force Test");
+               testTradeExists = true;
+               break;
+              }
+        }
+
+      if(!testTradeExists)
+        {
+         Print(">>> FORCE TRADE: Initiating one-time test trade...");
+
+         // Get Trend Direction from EMA
+         double emaArr[], closeArr[];
+         ArraySetAsSeries(emaArr, true);
+         ArraySetAsSeries(closeArr, true);
+
+         if(CopyBuffer(handleTrendEMA, 0, 0, 1, emaArr) == 1 &&
+            CopyClose(_Symbol, PERIOD_CURRENT, 0, 1, closeArr) == 1)
+           {
+            double ema   = emaArr[0];
+            double close = closeArr[0];
+            double lot   = CalculateLotSize(InpStopLoss);
+
+            if(lot > 0)
+              {
+               if(close > ema)
+                 {
+                  double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                  double sl  = ask - InpStopLoss * _Point;
+                  double tp  = ask + InpTakeProfit * _Point;
+                  Print(">>> FORCE TRADE: Executing BUY (Price > EMA).");
+                  trade.Buy(lot, _Symbol, ask, sl, tp, "DTECH Force Test");
+                 }
+               else
+                 {
+                  double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                  double sl  = bid + InpStopLoss * _Point;
+                  double tp  = bid - InpTakeProfit * _Point;
+                  Print(">>> FORCE TRADE: Executing SELL (Price < EMA).");
+                  trade.Sell(lot, _Symbol, bid, sl, tp, "DTECH Force Test");
+                 }
               }
             else
               {
-               double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-               double sl  = bid + InpStopLoss * _Point;
-               double tp  = bid - InpTakeProfit * _Point;
-               Print(">>> FORCE TRADE: Executing SELL (Price < EMA).");
-               trade.Sell(lot, _Symbol, bid, sl, tp, "DTECH Force Test");
+               Print(">>> FORCE TRADE FAILED: Lot size is 0 (Check Risk Settings).");
               }
-           }
-         else
-           {
-            Print(">>> FORCE TRADE FAILED: Lot size is 0 (Check Risk Settings).");
            }
         }
       else
         {
-         Print(">>> FORCE TRADE ERROR: Could not get data.");
+         // Quietly ignore if already open
         }
 
-      g_hasForcedTrade = true; // Mark as done regardless of success to prevent loop
+      g_hasForcedTrade = true; // Mark as done so we don't check again this session
      }
 
    // 2. Manage Open Positions (Trailing Stop)
@@ -207,8 +239,7 @@ bool CheckEnvironment()
    double spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
    if(spread > InpMaxSpread)
      {
-      // Optional: Print only occasionally to avoid spam
-      return(false);
+      return(false); // Spread too high, unsafe to trade
      }
 
    // Check Time (Server Time)
@@ -245,7 +276,6 @@ double CalculateLotSize(double slPoints, bool verbose=true)
       double riskMoney = balance * (InpRiskPercent / 100.0);
 
       double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-      // Fallback if tick value is unknown or zero to prevent div by zero
       if(tickValue <= 0) tickValue = 1.0;
 
       double moneyLossPerLot = slPoints * tickValue;
@@ -305,7 +335,6 @@ void ManagePositions()
       double priceCurrent = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
       double point    = _Point;
-      int    digits   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
       // --- TRAILING STOP LOGIC ---
 
@@ -316,9 +345,8 @@ void ManagePositions()
            {
             double newSL = priceCurrent - InpTrailDist * point;
 
-            // Check if new SL is higher than current SL (or if no SL exists)
-            // Also ensure new SL is not too close to current price (StopLevel check handled by Trade class mostly, but good to be safe)
-            if(newSL > sl + point) // Add a small buffer to avoid constant tiny updates
+            // Move SL up only
+            if(newSL > sl + point)
               {
                trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
               }
@@ -331,7 +359,7 @@ void ManagePositions()
            {
             double newSL = priceCurrent + InpTrailDist * point;
 
-            // Check if new SL is lower than current SL (or if no SL exists aka 0)
+            // Move SL down only
             if(sl == 0 || newSL < sl - point)
               {
                trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
@@ -340,16 +368,14 @@ void ManagePositions()
         }
      }
   }
+
 //--- Check for Entry Signals
 void CheckForEntry()
   {
    // 0. Pre-check: Ensure sufficient history bars exist for indicators
    if(Bars(_Symbol, PERIOD_CURRENT) < InpTrendPeriod)
      {
-      static int barWaitCount = 0;
-      if(barWaitCount++ % 100 == 0)
-         Print("Waiting for sufficient history data... (Have ", Bars(_Symbol, PERIOD_CURRENT), " bars, Need ", InpTrendPeriod, ")");
-      return;
+      return; // Waiting for data
      }
 
    // Define arrays for data
@@ -366,9 +392,6 @@ void CheckForEntry()
       CopyBuffer(handleRSI, 0, 0, 3, rsi) < 3 ||
       CopyClose(_Symbol, PERIOD_CURRENT, 0, 3, close) < 3)
      {
-      static int retryCount = 0;
-      if(retryCount++ % 10 == 0) // Reduce spam
-         Print("Waiting for data... (Buffers not ready)");
       return;
      }
 
@@ -379,48 +402,34 @@ void CheckForEntry()
    bool isDowntrend = close[1] < trendMA[1];
 
    // 2. Buy Signal (Uptrend + RSI crossover out of Oversold)
-   // RSI was below 30, now is above 30
    if(isUptrend && rsi[1] < InpRsiOversold && rsi[0] > InpRsiOversold)
      {
-      Print(">>> BUY SIGNAL: Price > EMA and RSI crossing up from Oversold");
+      Print(">>> BUY SIGNAL DETECTED");
 
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double sl  = ask - InpStopLoss * _Point;
       double tp  = ask + InpTakeProfit * _Point;
       double lot = CalculateLotSize(InpStopLoss);
 
-      // Execute only if lot size is valid (Risk Management)
       if(lot > 0)
         {
          trade.Buy(lot, _Symbol, ask, sl, tp, "DTECH Machine Gun Buy");
         }
-      else
-        {
-         // Log explicit reason for skip (Risk % too high for balance)
-         Print(">>> TRADE SKIPPED: Risk check failed (Volume 0.0).");
-        }
      }
 
    // 3. Sell Signal (Downtrend + RSI crossover out of Overbought)
-   // RSI was above 70, now is below 70
    else if(isDowntrend && rsi[1] > InpRsiOverbought && rsi[0] < InpRsiOverbought)
      {
-      Print(">>> SELL SIGNAL: Price < EMA and RSI crossing down from Overbought");
+      Print(">>> SELL SIGNAL DETECTED");
 
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       double sl  = bid + InpStopLoss * _Point;
       double tp  = bid - InpTakeProfit * _Point;
       double lot = CalculateLotSize(InpStopLoss);
 
-      // Execute only if lot size is valid (Risk Management)
       if(lot > 0)
         {
          trade.Sell(lot, _Symbol, bid, sl, tp, "DTECH Machine Gun Sell");
-        }
-      else
-        {
-         // Log explicit reason for skip (Risk % too high for balance)
-         Print(">>> TRADE SKIPPED: Risk check failed (Volume 0.0).");
         }
      }
   }
@@ -428,28 +437,13 @@ void CheckForEntry()
 //--- Force History Download
 void DownloadHistory()
   {
-   Print(">> FORCE DOWNLOAD: Attempting to synchronize history data for ", _Symbol);
-
-   // Check if synchronized
-   if(!SeriesInfoInteger(_Symbol, PERIOD_CURRENT, SERIES_SYNCHRONIZED))
-     {
-      Print(">> Series not synchronized. Requesting data...");
-     }
-
-   // Attempt to copy deep history (e.g., last 3 years)
-   datetime startTime = TimeCurrent() - 3 * 365 * 24 * 3600; // Approx 3 years ago
+   Print(">> DATA SYNC: Downloading history for ", _Symbol);
+   datetime startTime = TimeCurrent() - 3 * 365 * 24 * 3600; // 3 years
    MqlRates rates[];
-
-   // Requesting data forces the terminal to download it
-   int copied = CopyRates(_Symbol, PERIOD_CURRENT, startTime, TimeCurrent(), rates);
-
-   if(copied > 0)
-     Print(">> Successfully accessed ", copied, " bars of history. Data should be downloading.");
-   else
-     Print(">> Warning: Could not immediately access deep history. Terminal will download in background.");
+   CopyRates(_Symbol, PERIOD_CURRENT, startTime, TimeCurrent(), rates);
   }
 
-//--- Update Status (Chart Comment & Log)
+//--- Update Status (Beginner Friendly Dashboard)
 void UpdateStatus()
   {
    // Only update if connected
@@ -462,7 +456,6 @@ void UpdateStatus()
    ArraySetAsSeries(emaArr, true);
    ArraySetAsSeries(closeArr, true);
 
-   // Get current values (buffer 0, index 0, count 1)
    if(CopyBuffer(handleRSI, 0, 0, 1, rsiArr) < 1 ||
       CopyBuffer(handleTrendEMA, 0, 0, 1, emaArr) < 1 ||
       CopyClose(_Symbol, PERIOD_CURRENT, 0, 1, closeArr) < 1)
@@ -473,37 +466,36 @@ void UpdateStatus()
    double rsi = rsiArr[0];
    double ema = emaArr[0];
    double close = closeArr[0];
-   string trend = (close > ema) ? "UPTREND (Price > EMA)" : "DOWNTREND (Price < EMA)";
 
+   // Simplify Trend Status
+   string trendMsg = "FLAT";
+   if(close > ema) trendMsg = "UP (Look for Buys)";
+   else trendMsg = "DOWN (Look for Sells)";
+
+   // Simplify Account Info
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
    double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
    double nextLot = CalculateLotSize(InpStopLoss, false);
 
    string msg = StringFormat(
-      "=== DTECH BOT V2 (AGGRESSOR) ===\n"
-      "--------------------------------\n"
-      "Balance: %.2f | Equity: %.2f\n"
-      "Risk: %.1f%% | NEXT LOT: %.2f%s\n"
-      "--------------------------------\n"
-      "Price: %.5f | EMA(%d): %.5f\n"
-      "Trend: %s\n"
-      "RSI(%d): %.2f %s\n"
-      "Spread: %d | Time: %s",
+      "=== DTECH BOT V2.1 (SAFETY MODE) ===\n"
+      "------------------------------------\n"
+      "MASTER SWITCH:    %s\n"
+      "------------------------------------\n"
+      "Money (Banked):   $%.2f\n"
+      "Equity (Live):    $%.2f\n"
+      "Risk per Trade:   %.1f%% (Lot: %.2f)\n"
+      "------------------------------------\n"
+      "MARKET TREND:     %s\n"
+      "SIGNAL STATUS:    RSI is %.1f %s\n"
+      "Time:             %s",
+      (InpMasterSwitch ? "ON (Trading Active)" : "OFF (Stopped)"),
       bal, eq,
-      InpRiskPercent, nextLot, (nextLot == 0.0 ? " (BLOCKED)" : ""),
-      close, InpTrendPeriod, ema,
-      trend,
-      InpRsiPeriod, rsi, (rsi > InpRsiOverbought ? "(OB)" : (rsi < InpRsiOversold ? "(OS)" : "")),
-      (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), TimeToString(TimeCurrent(), TIME_MINUTES)
+      InpRiskPercent, nextLot,
+      trendMsg,
+      rsi, (rsi > InpRsiOverbought ? "(Overbought - Wait)" : (rsi < InpRsiOversold ? "(Oversold - Wait)" : "(Neutral)")),
+      TimeToString(TimeCurrent(), TIME_MINUTES)
    );
 
    Comment(msg);
-
-   // Log status periodically (every 60 seconds)
-   static datetime lastLog = 0;
-   if(TimeCurrent() - lastLog >= 60)
-     {
-      Print("STATUS UPDATE: ", msg);
-      lastLog = TimeCurrent();
-     }
   }
