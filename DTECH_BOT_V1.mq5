@@ -63,6 +63,9 @@ CTrade         trade;
 int            handleTrendEMA;
 int            handleRSI;
 
+// Forward Declaration
+void UpdateStatus();
+
 //+------------------------------------------------------------------+
 //| INITIALIZATION                                                   |
 //+------------------------------------------------------------------+
@@ -110,6 +113,9 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   // 0. Update Status (Comment on Chart)
+   UpdateStatus();
+
    // 1. Check basic conditions (Terminal connected, Spread, etc.)
    if(!CheckEnvironment()) return;
 
@@ -204,7 +210,11 @@ double CalculateLotSize(double slPoints)
    volume = MathFloor(volume / step) * step;
 
    // Clamp to limits
-   if(volume < min) volume = min; // Or 0 if strict risk management? Usually min to ensure trade
+   if(volume < min)
+     {
+      Print(StringFormat("RISK ALERT: Calculated volume %.5f is below minimum %.2f. Balance too low for %.1f%% risk.", volume, min, InpRiskPercent));
+      return(0.0);
+     }
    if(volume > max) volume = max;
 
    return(volume);
@@ -316,9 +326,15 @@ void CheckForEntry()
       double tp  = ask + InpTakeProfit * _Point;
       double lot = CalculateLotSize(InpStopLoss);
 
+      // Execute only if lot size is valid (Risk Management)
       if(lot > 0)
         {
          trade.Buy(lot, _Symbol, ask, sl, tp, "DTECH Machine Gun Buy");
+        }
+      else
+        {
+         // Log explicit reason for skip (Risk % too high for balance)
+         Print(">>> TRADE SKIPPED: Risk check failed (Volume 0.0).");
         }
      }
 
@@ -333,9 +349,15 @@ void CheckForEntry()
       double tp  = bid - InpTakeProfit * _Point;
       double lot = CalculateLotSize(InpStopLoss);
 
+      // Execute only if lot size is valid (Risk Management)
       if(lot > 0)
         {
          trade.Sell(lot, _Symbol, bid, sl, tp, "DTECH Machine Gun Sell");
+        }
+      else
+        {
+         // Log explicit reason for skip (Risk % too high for balance)
+         Print(">>> TRADE SKIPPED: Risk check failed (Volume 0.0).");
         }
      }
   }
@@ -362,4 +384,56 @@ void DownloadHistory()
      Print(">> Successfully accessed ", copied, " bars of history. Data should be downloading.");
    else
      Print(">> Warning: Could not immediately access deep history. Terminal will download in background.");
+  }
+
+//--- Update Status (Chart Comment & Log)
+void UpdateStatus()
+  {
+   // Only update if connected
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED)) return;
+
+   double rsiArr[];
+   double emaArr[];
+   double closeArr[];
+   ArraySetAsSeries(rsiArr, true);
+   ArraySetAsSeries(emaArr, true);
+   ArraySetAsSeries(closeArr, true);
+
+   // Get current values (buffer 0, index 0, count 1)
+   if(CopyBuffer(handleRSI, 0, 0, 1, rsiArr) < 1 ||
+      CopyBuffer(handleTrendEMA, 0, 0, 1, emaArr) < 1 ||
+      CopyClose(_Symbol, PERIOD_CURRENT, 0, 1, closeArr) < 1)
+     {
+      return;
+     }
+
+   double rsi = rsiArr[0];
+   double ema = emaArr[0];
+   double close = closeArr[0];
+   string trend = (close > ema) ? "UPTREND (Price > EMA)" : "DOWNTREND (Price < EMA)";
+
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   string msg = StringFormat(
+      "=== DTECH BOT V2 (AGGRESSOR) ===\n"
+      "Balance: %.2f | Equity: %.2f | Risk: %.1f%%\n"
+      "Price: %.5f | EMA(%d): %.5f | %s\n"
+      "RSI(%d): %.2f %s\n"
+      "Spread: %d | Time: %s",
+      bal, eq, InpRiskPercent,
+      close, InpTrendPeriod, ema, trend,
+      InpRsiPeriod, rsi, (rsi > InpRsiOverbought ? "(OB)" : (rsi < InpRsiOversold ? "(OS)" : "")),
+      (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), TimeToString(TimeCurrent(), TIME_MINUTES)
+   );
+
+   Comment(msg);
+
+   // Log status periodically (every 60 seconds)
+   static datetime lastLog = 0;
+   if(TimeCurrent() - lastLog >= 60)
+     {
+      Print("STATUS UPDATE: ", msg);
+      lastLog = TimeCurrent();
+     }
   }
