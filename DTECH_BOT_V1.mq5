@@ -57,12 +57,17 @@ input int               InpMaxPositions      = 5;            // Max Open Positio
 input int               InpMagicNum          = 123456;       // Magic Number
 input bool              InpForceHistoryDownload = true;      // Force History Download (Live Chart)
 
+// --- Debugging ---
+input group             "=== Debugging ==="
+input bool              InpForceTestTrade    = false;        // Force Immediate Test Trade
+
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
 //+------------------------------------------------------------------+
 CTrade         trade;
 int            handleTrendEMA;
 int            handleRSI;
+bool           g_hasForcedTrade = false;
 
 // Forward Declaration
 void UpdateStatus();
@@ -119,6 +124,55 @@ void OnTick()
 
    // 1. Check basic conditions (Terminal connected, Spread, etc.)
    if(!CheckEnvironment()) return;
+
+   // --- FORCE TEST TRADE LOGIC ---
+   if(InpForceTestTrade && !g_hasForcedTrade)
+     {
+      Print(">>> FORCE TRADE: Initiating one-time test trade...");
+
+      // Get Trend Direction from EMA
+      double emaArr[], closeArr[];
+      ArraySetAsSeries(emaArr, true);
+      ArraySetAsSeries(closeArr, true);
+
+      if(CopyBuffer(handleTrendEMA, 0, 0, 1, emaArr) == 1 &&
+         CopyClose(_Symbol, PERIOD_CURRENT, 0, 1, closeArr) == 1)
+        {
+         double ema   = emaArr[0];
+         double close = closeArr[0];
+         double lot   = CalculateLotSize(InpStopLoss);
+
+         if(lot > 0)
+           {
+            if(close > ema)
+              {
+               double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+               double sl  = ask - InpStopLoss * _Point;
+               double tp  = ask + InpTakeProfit * _Point;
+               Print(">>> FORCE TRADE: Executing BUY (Price > EMA).");
+               trade.Buy(lot, _Symbol, ask, sl, tp, "DTECH Force Test");
+              }
+            else
+              {
+               double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+               double sl  = bid + InpStopLoss * _Point;
+               double tp  = bid - InpTakeProfit * _Point;
+               Print(">>> FORCE TRADE: Executing SELL (Price < EMA).");
+               trade.Sell(lot, _Symbol, bid, sl, tp, "DTECH Force Test");
+              }
+           }
+         else
+           {
+            Print(">>> FORCE TRADE FAILED: Lot size is 0 (Check Risk Settings).");
+           }
+        }
+      else
+        {
+         Print(">>> FORCE TRADE ERROR: Could not get data.");
+        }
+
+      g_hasForcedTrade = true; // Mark as done regardless of success to prevent loop
+     }
 
    // 2. Manage Open Positions (Trailing Stop)
    ManagePositions();
