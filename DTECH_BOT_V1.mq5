@@ -54,6 +54,7 @@ input int               InpStartHour         = 0;            // Start Trading Ho
 input int               InpEndHour           = 23;           // End Trading Hour (0-23)
 input int               InpMaxPositions      = 5;            // Max Open Positions
 input int               InpMagicNum          = 123456;       // Magic Number
+input bool              InpForceHistoryDownload = true;      // Force History Download (Live Chart)
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
@@ -82,6 +83,12 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagicNum);
    trade.SetMarginMode();
    trade.SetTypeFillingBySymbol(_Symbol);
+
+   // 4. Force History Download (if not in Tester)
+   if(InpForceHistoryDownload && !MQLInfoInteger(MQL_TESTER))
+     {
+      DownloadHistory();
+     }
 
    Print(">> DTECH BOT V2 (AGGRESSOR) INITIALIZED <<");
    return(INIT_SUCCEEDED);
@@ -263,6 +270,15 @@ void ManagePositions()
 //--- Check for Entry Signals
 void CheckForEntry()
   {
+   // 0. Pre-check: Ensure sufficient history bars exist for indicators
+   if(Bars(_Symbol, PERIOD_CURRENT) < InpTrendPeriod)
+     {
+      static int barWaitCount = 0;
+      if(barWaitCount++ % 100 == 0)
+         Print("Waiting for sufficient history data... (Have ", Bars(_Symbol, PERIOD_CURRENT), " bars, Need ", InpTrendPeriod, ")");
+      return;
+     }
+
    // Define arrays for data
    double trendMA[];
    double rsi[];
@@ -277,6 +293,9 @@ void CheckForEntry()
       CopyBuffer(handleRSI, 0, 0, 3, rsi) < 3 ||
       CopyClose(_Symbol, PERIOD_CURRENT, 0, 3, close) < 3)
      {
+      static int retryCount = 0;
+      if(retryCount++ % 10 == 0) // Reduce spam
+         Print("Waiting for data... (Buffers not ready)");
       return;
      }
 
@@ -319,4 +338,28 @@ void CheckForEntry()
          trade.Sell(lot, _Symbol, bid, sl, tp, "DTECH Machine Gun Sell");
         }
      }
+  }
+
+//--- Force History Download
+void DownloadHistory()
+  {
+   Print(">> FORCE DOWNLOAD: Attempting to synchronize history data for ", _Symbol);
+
+   // Check if synchronized
+   if(!SeriesInfoInteger(_Symbol, PERIOD_CURRENT, SERIES_SYNCHRONIZED))
+     {
+      Print(">> Series not synchronized. Requesting data...");
+     }
+
+   // Attempt to copy deep history (e.g., last 3 years)
+   datetime startTime = TimeCurrent() - 3 * 365 * 24 * 3600; // Approx 3 years ago
+   MqlRates rates[];
+
+   // Requesting data forces the terminal to download it
+   int copied = CopyRates(_Symbol, PERIOD_CURRENT, startTime, TimeCurrent(), rates);
+
+   if(copied > 0)
+     Print(">> Successfully accessed ", copied, " bars of history. Data should be downloading.");
+   else
+     Print(">> Warning: Could not immediately access deep history. Terminal will download in background.");
   }
